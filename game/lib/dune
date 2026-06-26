@@ -1,0 +1,8 @@
+(library
+ (name engine)
+ (modules engine)
+ (foreign_stubs
+  (language c)
+  (names engine_stub))
+ (c_library_flags -I%{project_root}/engine/include)
+ (library_flags (:include ../config/link_flags.sexp)))
