@@ -52,78 +52,6 @@ void main() {
 }
 )";
 
-constexpr const char* kRaytraceVertexShader = R"(#version 330 core
-const vec2 verts[3] = vec2[3](
-    vec2(-1.0, -1.0),
-    vec2( 3.0, -1.0),
-    vec2(-1.0,  3.0)
-);
-
-out vec2 vUv;
-
-void main() {
-    vUv = verts[gl_VertexID] * 0.5 + 0.5;
-    gl_Position = vec4(verts[gl_VertexID], 0.0, 1.0);
-}
-)";
-
-constexpr const char* kRaytraceFragmentShader = R"(#version 330 core
-in vec2 vUv;
-out vec4 FragColor;
-
-bool hitSphere(vec3 ro, vec3 rd, vec3 center, float radius, out float t, out vec3 normal) {
-    vec3 oc = ro - center;
-    float b = dot(oc, rd);
-    float c = dot(oc, oc) - radius * radius;
-    float h = b * b - c;
-
-    if (h < 0.0) return false;
-
-    h = sqrt(h);
-    t = -b - h;
-
-    if (t < 0.001) t = -b + h;
-    if (t < 0.001) return false;
-
-    vec3 p = ro + rd * t;
-    normal = normalize(p - center);
-    return true;
-}
-
-vec3 skyColor(vec3 rd) {
-    float a = 0.5 * (rd.y + 1.0);
-    return mix(vec3(0.08, 0.06, 0.16), vec3(0.55, 0.75, 1.0), a);
-}
-
-void main() {
-    vec2 uv = vUv * 2.0 - 1.0;
-
-    vec3 ro = vec3(0.0, 1.0, 4.0);
-   uv.x *= 16.0 / 9.0;
-vec3 rd = normalize(vec3(uv.x, uv.y, -1.5));
-
-    vec3 color = skyColor(rd);
-
-    float t;
-    vec3 n;
-
-    if (hitSphere(ro, rd, vec3(0.0, 1.0, 0.0), 1.0, t, n)) {
-        vec3 hitPos = ro + rd * t;
-        vec3 reflected = reflect(rd, n);
-
-        vec3 lightDir = normalize(vec3(-0.4, 0.8, 0.3));
-        float diffuse = max(dot(n, lightDir), 0.0);
-
-        vec3 reflectionColor = skyColor(reflected);
-        vec3 baseColor = vec3(0.85, 0.85, 0.9) * diffuse;
-
-        color = mix(baseColor, reflectionColor, 0.95);
-    }
-
-    FragColor = vec4(color, 1.0);
-}
-)";
-
 constexpr const char *kSkyVertexShader = R"(#version 330 core
 layout (location = 0) in vec2 aPos;
 out vec2 vNdc;
@@ -308,16 +236,12 @@ bool Renderer::init() {
   const unsigned int sky_vs = compile_shader(kGlVertexShader, kSkyVertexShader);
   const unsigned int sky_fs = compile_shader(kGlFragmentShader, kSkyFragmentShader);
 
-  const unsigned int ray_vs = compile_shader(kGlVertexShader, kRaytraceVertexShader);
-  const unsigned int ray_fs = compile_shader(kGlFragmentShader, kRaytraceFragmentShader);
-
   if (!mesh_vs || !mesh_fs || !sky_vs || !sky_fs) {
     return false;
   }
 
   mesh_program_ = link_program(mesh_vs, mesh_fs);
   sky_program_ = link_program(sky_vs, sky_fs);
-  raytrace_program_ = link_program(ray_vs, ray_fs);
 
   gl::delete_shader(mesh_vs);
   gl::delete_shader(mesh_fs);
@@ -477,12 +401,8 @@ void Renderer::draw(const SceneDrawParams &scene) {
       0.0f, 1.0f, 0.0f);
   const SceneTransforms transforms = compute_scene_transforms(scene);
 
-  //draw_sky(camera, aspect, scene.time);
-  //draw_scene_meshes(projection, view, scene, transforms);
-  gl::use_program(raytrace_program_);
-  gl::bind_vertex_array(sky_vao_);
-  gl::draw_arrays(kGlTriangles, 0, 3);
-
+  draw_sky(camera, aspect, scene.time);
+  draw_scene_meshes(projection, view, scene, transforms);
 }
 
 void Renderer::shutdown() {
