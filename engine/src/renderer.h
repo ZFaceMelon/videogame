@@ -37,7 +37,9 @@ public:
 
 private:
   unsigned int mesh_program_ = 0;
+  unsigned int raytrace_program_ = 0;
   unsigned int sky_program_ = 0;
+  unsigned int arena_triangle_buffer_ = 0;
   unsigned int vao_ = 0;
   unsigned int sky_vao_ = 0;
   unsigned int arena_vbo_ = 0;
@@ -49,6 +51,7 @@ private:
   unsigned int dummy_post_vbo_ = 0;
   unsigned int dummy_body_vbo_ = 0;
   unsigned int sky_vbo_ = 0;
+  int arena_triangle_count_ = 0;
   int arena_vertex_count_ = 0;
   int torso_vertex_count_ = 0;
   int leg_vertex_count_ = 0;

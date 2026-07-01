@@ -1,1 +1,1 @@
-( -cclib "C:/Users/zanek/videogame/build/engine/Release/engine.lib" -cclib "C:/Users/zanek/videogame/build/_deps/glfw-build/src/Release/glfw3.lib" )
+( -cclib "C:/Users/lizpa/OneDrive/Desktop/videogame/out/build/x64-Debug/engine/engine.lib" -cclib "C:/Users/lizpa/OneDrive/Desktop/videogame/out/build/x64-Debug/_deps/glfw-build/src/glfw3.lib" )
