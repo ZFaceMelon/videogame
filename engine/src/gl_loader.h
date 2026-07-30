@@ -26,6 +26,9 @@ void buffer_data(unsigned int target, long long size, const void *data, unsigned
 void vertex_attrib_pointer(unsigned int index, int size, unsigned int type,
                            unsigned char normalized, int stride, const void *pointer);
 void enable_vertex_attrib_array(unsigned int index);
+void vertex_attrib_ipointer(unsigned int index, int size, unsigned int type, int stride,
+                            const void *pointer);
+void draw_elements(unsigned int mode, int count, unsigned int type, const void *indices);
 
 unsigned int create_shader(unsigned int type);
 void shader_source(unsigned int shader, int count, const char **source, const int *length);

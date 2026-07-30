@@ -1,7 +1,6 @@
 #include "engine/engine.h"
 
 #include "arena_mesh.h"
-#include "character_mesh.h"
 #include "dummy_mesh.h"
 #include "renderer.h"
 
@@ -14,10 +13,10 @@ namespace engine {
 namespace {
 
 constexpr float kMoveSpeed = 4.0f;
+constexpr float kSprintSpeedMultiplier = 1.2f;
 constexpr float kMouseSensitivity = 0.0025f;
 constexpr float kMinCameraPitch = -1.52f;
 constexpr float kMaxCameraPitch = 1.52f;
-constexpr float kSwingDuration = 0.35f;
 constexpr float kMaxSwingAngle = 1.6f;
 constexpr float kPi = 3.1415926535f;
 constexpr float kWalkAnimSpeed = 9.0f;
@@ -25,6 +24,7 @@ constexpr float kDummyHitDamage = 34.0f;
 constexpr float kDummyHitLean = 0.55f;
 constexpr float kDummyHitRecoverSpeed = 2.5f;
 
+constexpr float kCharacterHeightUnits = 1.54f;
 constexpr float kCharacterHeightFeet = 6.0f;
 constexpr float kJumpHeightFeet = 3.0f;
 constexpr float kGravityEarthFtPerSecSq = 32.2f;
@@ -52,7 +52,12 @@ struct AppState {
   bool swing_hit_landed = false;
   bool grounded = true;
   bool moving = false;
+  bool sprinting = false;
+  bool toggle_equip = false;
   bool dummy_alive = true;
+  bool e_was_pressed = false;
+  float move_forward = 0.0f;
+  float move_right = 0.0f;
   double last_mouse_x = 0.0;
   double last_mouse_y = 0.0;
   bool first_mouse_sample = true;
@@ -78,25 +83,9 @@ void rotate_y_local(float &x, float &y, float &z, float angle) {
   (void)y;
 }
 
-void sword_tip_world(float player_x, float player_y, float player_z, float player_yaw,
-                     float swing_angle, float &world_x, float &world_y, float &world_z) {
-  const float hand_x = kWeaponHandX - kWeaponShoulderX;
-  const float hand_y = kWeaponHandY - kWeaponShoulderY;
-  const float hand_z = kWeaponHandZ - kWeaponShoulderZ;
-
-  float local_x = hand_x;
-  float local_y = hand_y;
-  float local_z = hand_z + 0.30f;
-  rotate_x_local(local_x, local_y, local_z, swing_angle);
-
-  local_x += kWeaponShoulderX;
-  local_y += kWeaponShoulderY;
-  local_z += kWeaponShoulderZ;
-  rotate_y_local(local_x, local_y, local_z, player_yaw);
-
-  world_x = player_x + local_x;
-  world_y = player_y + local_y;
-  world_z = player_z + local_z;
+void sword_tip_world(const AppState &state, const SceneDrawParams &scene, float &world_x,
+                     float &world_y, float &world_z) {
+  state.renderer.sword_tip_world(scene, world_x, world_y, world_z);
 }
 
 bool point_in_dummy_hit(float local_x, float local_y, float local_z) {
@@ -105,12 +94,11 @@ bool point_in_dummy_hit(float local_x, float local_y, float local_z) {
          local_z >= kDummyHitMinZ && local_z <= kDummyHitMaxZ;
 }
 
-bool sword_hits_dummy(const AppState &state, float swing_angle) {
+bool sword_hits_dummy(const AppState &state, const SceneDrawParams &scene) {
   float tip_x = 0.0f;
   float tip_y = 0.0f;
   float tip_z = 0.0f;
-  sword_tip_world(state.player_x, state.player_y, state.player_z, state.player_yaw,
-                  swing_angle, tip_x, tip_y, tip_z);
+  sword_tip_world(state, scene, tip_x, tip_y, tip_z);
 
   float local_x = tip_x - kDummySpawnX;
   float local_y = tip_y - kDummySpawnY;
@@ -154,6 +142,7 @@ void cursor_position_callback(GLFWwindow *window, double xpos, double ypos) {
   state->camera_pitch = clamp(
       state->camera_pitch + static_cast<float>(delta_y) * kMouseSensitivity,
       kMinCameraPitch, kMaxCameraPitch);
+  state->player_yaw = state->camera_yaw;
 }
 
 void mouse_button_callback(GLFWwindow *window, int button, int action, int /*mods*/) {
@@ -162,6 +151,10 @@ void mouse_button_callback(GLFWwindow *window, int button, int action, int /*mod
   }
 
   auto *state = static_cast<AppState *>(glfwGetWindowUserPointer(window));
+  state->sprinting = false;
+  if (!state->renderer.can_swing()) {
+    return;
+  }
   if (!state->swinging) {
     state->swinging = true;
     state->swing_progress = 0.0f;
@@ -169,12 +162,13 @@ void mouse_button_callback(GLFWwindow *window, int button, int action, int /*mod
   }
 }
 
-void update_swing(AppState &state, float delta_time) {
+void update_swing(AppState &state, float clip_duration, float delta_time) {
   if (!state.swinging) {
     return;
   }
 
-  state.swing_progress += delta_time / kSwingDuration;
+  const float duration = std::max(clip_duration, 0.001f);
+  state.swing_progress += delta_time / duration;
   if (state.swing_progress >= 1.0f) {
     state.swing_progress = 0.0f;
     state.swinging = false;
@@ -189,7 +183,7 @@ float current_swing_angle(const AppState &state) {
   return std::sin(state.swing_progress * kPi) * kMaxSwingAngle;
 }
 
-void update_combat(AppState &state) {
+void update_combat(AppState &state, const SceneDrawParams &scene) {
   if (!state.dummy_alive || !state.swinging || state.swing_hit_landed) {
     return;
   }
@@ -198,8 +192,7 @@ void update_combat(AppState &state) {
     return;
   }
 
-  const float swing_angle = current_swing_angle(state);
-  if (!sword_hits_dummy(state, swing_angle)) {
+  if (!sword_hits_dummy(state, scene)) {
     return;
   }
 
@@ -257,6 +250,10 @@ void try_move_axis(AppState &state, float new_x, float new_z) {
 }
 
 void update_movement(GLFWwindow *window, AppState &state, float delta_time) {
+  state.toggle_equip = false;
+  state.player_yaw = state.camera_yaw;
+  const bool action_lock = state.renderer.action_overrides_sprint();
+
   float input_forward = 0.0f;
   float input_right = 0.0f;
 
@@ -277,7 +274,31 @@ void update_movement(GLFWwindow *window, AppState &state, float delta_time) {
     glfwSetWindowShouldClose(window, GLFW_TRUE);
   }
 
+  const bool e_pressed = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
+  if (e_pressed && !state.e_was_pressed) {
+    state.sprinting = false;
+    state.toggle_equip = true;
+  }
+  state.e_was_pressed = e_pressed;
+
+  if (state.toggle_equip || action_lock) {
+    state.moving = false;
+    state.sprinting = false;
+    state.move_forward = 0.0f;
+    state.move_right = 0.0f;
+    return;
+  }
+
   state.moving = input_forward != 0.0f || input_right != 0.0f;
+  state.move_forward = input_forward;
+  state.move_right = input_right;
+
+  const bool shift_held = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                          glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+  state.sprinting =
+      shift_held && input_forward > 0.0f && state.moving && state.grounded &&
+      !state.swinging;
+
   if (!state.moving) {
     return;
   }
@@ -295,13 +316,15 @@ void update_movement(GLFWwindow *window, AppState &state, float delta_time) {
   const float move_x = -input_right * right_x + input_forward * forward_x;
   const float move_z = -input_right * right_z + input_forward * forward_z;
 
-  const float delta_x = move_x * kMoveSpeed * delta_time;
-  const float delta_z = move_z * kMoveSpeed * delta_time;
+  const float speed =
+      state.sprinting ? kMoveSpeed * kSprintSpeedMultiplier : kMoveSpeed;
+  const float delta_x = move_x * speed * delta_time;
+  const float delta_z = move_z * speed * delta_time;
   try_move_axis(state, state.player_x + delta_x, state.player_z + delta_z);
   depenetrate(state.player_x, state.player_y, state.player_z);
 
-  state.player_yaw = std::atan2(-move_x, move_z);
-  state.walk_phase += delta_time * kWalkAnimSpeed;
+  const float walk_rate = state.sprinting ? kWalkAnimSpeed * 1.35f : kWalkAnimSpeed;
+  state.walk_phase += delta_time * walk_rate;
 }
 
 void update_walk_phase(AppState &state, float delta_time) {
@@ -312,18 +335,26 @@ void update_walk_phase(AppState &state, float delta_time) {
   (void)delta_time;
 }
 
-SceneDrawParams build_scene(const AppState &state, double current_time) {
+SceneDrawParams build_scene(const AppState &state, double current_time, float delta_time) {
   SceneDrawParams scene{};
   scene.player_x = state.player_x;
   scene.player_y = state.player_y;
   scene.player_z = state.player_z;
-  scene.player_yaw = state.player_yaw;
+  scene.player_yaw = state.camera_yaw;
   scene.camera_yaw = state.camera_yaw;
   scene.camera_pitch = state.camera_pitch;
+  scene.move_forward = state.move_forward;
+  scene.move_right = state.move_right;
   scene.swing_angle = current_swing_angle(state);
   scene.walk_phase = state.walk_phase;
   scene.dummy_hit_lean = state.dummy_hit_lean;
   scene.dummy_alive = state.dummy_alive;
+  scene.moving = state.moving;
+  scene.sprinting = state.sprinting;
+  scene.swinging = state.swinging;
+  scene.dodging = false;
+  scene.toggle_equip = state.toggle_equip;
+  scene.delta_time = delta_time;
   scene.time = static_cast<float>(current_time);
   return scene;
 }
@@ -378,10 +409,12 @@ int run() {
     update_movement(window, state, delta_time);
     update_walk_phase(state, delta_time);
     update_vertical_motion(window, state, delta_time);
-    update_swing(state, delta_time);
-    update_combat(state);
+    update_swing(state, state.renderer.swing_clip_duration(), delta_time);
+    const SceneDrawParams scene = build_scene(state, current_time, delta_time);
+    state.renderer.update_samurai(scene);
+    update_combat(state, scene);
     update_dummy_reaction(state, delta_time);
-    state.renderer.draw(build_scene(state, current_time));
+    state.renderer.draw(scene);
     glfwSwapBuffers(window);
     glfwPollEvents();
   }

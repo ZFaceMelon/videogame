@@ -1,14 +1,34 @@
+include(FetchContent)
+
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG        v1.13
+)
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        master
+)
+FetchContent_MakeAvailable(cgltf stb)
+
 add_library(engine STATIC
     src/api.cpp
     src/engine.cpp
     src/gl_loader.cpp
+    src/gltf_asset.cpp
     src/renderer.cpp
 )
 
 target_include_directories(engine
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE
+        ${cgltf_SOURCE_DIR}
+        ${stb_SOURCE_DIR}
 )
+
+target_compile_definitions(engine PRIVATE ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
 
 target_link_libraries(engine PUBLIC glfw)
 
@@ -28,7 +48,6 @@ else()
     target_link_libraries(engine PUBLIC OpenGL::GL)
 endif()
 
-# Write OCaml link flags after each engine build (avoids VS multi-config file(GENERATE) errors).
 add_custom_command(
     TARGET engine POST_BUILD
     COMMAND ${CMAKE_COMMAND}

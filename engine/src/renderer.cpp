@@ -1,7 +1,6 @@
 #include "renderer.h"
 
 #include "arena_mesh.h"
-#include "character_mesh.h"
 #include "dummy_mesh.h"
 #include "gl_loader.h"
 #include "math.h"
@@ -35,11 +34,16 @@ constexpr float kSunDirZ = -0.451f;
 
 constexpr const char *kMeshVertexShader = R"(#version 330 core
 layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aColor;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec3 aColor;
 uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform vec3 uLightDir;
 out vec3 vColor;
 void main() {
-    vColor = aColor;
+    vec3 n = normalize(mat3(uModel) * aNormal);
+    float ndl = max(dot(n, normalize(uLightDir)), 0.0);
+    vColor = aColor * (0.22 + 0.78 * ndl);
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )";
@@ -49,6 +53,78 @@ in vec3 vColor;
 out vec4 FragColor;
 void main() {
     FragColor = vec4(vColor, 1.0);
+}
+)";
+
+constexpr const char *kRaytraceVertexShader = R"(#version 330 core
+const vec2 verts[3] = vec2[3](
+    vec2(-1.0, -1.0),
+    vec2( 3.0, -1.0),
+    vec2(-1.0,  3.0)
+);
+
+out vec2 vUv;
+
+void main() {
+    vUv = verts[gl_VertexID] * 0.5 + 0.5;
+    gl_Position = vec4(verts[gl_VertexID], 0.0, 1.0);
+}
+)";
+
+constexpr const char *kRaytraceFragmentShader = R"(#version 330 core
+in vec2 vUv;
+uniform float uAspect;
+out vec4 FragColor;
+
+bool hitSphere(vec3 ro, vec3 rd, vec3 center, float radius, out float t, out vec3 normal) {
+    vec3 oc = ro - center;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - radius * radius;
+    float h = b * b - c;
+
+    if (h < 0.0) return false;
+
+    h = sqrt(h);
+    t = -b - h;
+
+    if (t < 0.001) t = -b + h;
+    if (t < 0.001) return false;
+
+    vec3 p = ro + rd * t;
+    normal = normalize(p - center);
+    return true;
+}
+
+vec3 skyColor(vec3 rd) {
+    float a = 0.5 * (rd.y + 1.0);
+    return mix(vec3(0.08, 0.06, 0.16), vec3(0.55, 0.75, 1.0), a);
+}
+
+void main() {
+    vec2 uv = vUv * 2.0 - 1.0;
+    uv.x *= uAspect;
+
+    vec3 ro = vec3(0.0, 1.0, 4.0);
+    vec3 rd = normalize(vec3(uv.x, uv.y, -1.5));
+
+    vec3 color = skyColor(rd);
+
+    float t;
+    vec3 n;
+
+    if (hitSphere(ro, rd, vec3(0.0, 1.0, 0.0), 1.0, t, n)) {
+        vec3 reflected = reflect(rd, n);
+
+        vec3 lightDir = normalize(vec3(-0.4, 0.8, 0.3));
+        float diffuse = max(dot(n, lightDir), 0.0);
+
+        vec3 reflectionColor = skyColor(reflected);
+        vec3 baseColor = vec3(0.85, 0.85, 0.9) * diffuse;
+
+        color = mix(baseColor, reflectionColor, 0.95);
+    }
+
+    FragColor = vec4(color, 1.0);
 }
 )";
 
@@ -203,19 +279,6 @@ unsigned int Renderer::link_program(unsigned int vertex_shader, unsigned int fra
 
 SceneTransforms Renderer::compute_scene_transforms(const SceneDrawParams &scene) const {
   SceneTransforms transforms{};
-  transforms.player_model =
-      Mat4::translate(scene.player_x, scene.player_y, scene.player_z) *
-      Mat4::rotate_y(scene.player_yaw);
-
-  const float leg_stride = std::sin(scene.walk_phase) * 0.10f;
-  const float leg_swing = std::sin(scene.walk_phase) * 0.45f;
-  transforms.left_leg_local =
-      Mat4::translate(kLeftLegX, kLegCenterY, leg_stride) * Mat4::rotate_x(leg_swing);
-  transforms.right_leg_local =
-      Mat4::translate(kRightLegX, kLegCenterY, -leg_stride) * Mat4::rotate_x(-leg_swing);
-  transforms.weapon_arm_local =
-      Mat4::translate(kWeaponShoulderX, kWeaponShoulderY, kWeaponShoulderZ) *
-      Mat4::rotate_x(scene.swing_angle);
   transforms.dummy_model =
       Mat4::translate(kDummySpawnX, kDummySpawnY, kDummySpawnZ) *
       Mat4::rotate_y(kDummySpawnYaw);
@@ -224,6 +287,11 @@ SceneTransforms Renderer::compute_scene_transforms(const SceneDrawParams &scene)
       Mat4::translate(0.0f, 0.55f, 0.0f) * Mat4::rotate_x(-dummy_lean) *
       Mat4::translate(0.0f, -0.55f, 0.0f);
   return transforms;
+}
+
+Mat4 Renderer::player_model_matrix(const SceneDrawParams &scene) const {
+  return Mat4::translate(scene.player_x, scene.player_y, scene.player_z) *
+         Mat4::rotate_y(scene.player_yaw);
 }
 
 bool Renderer::init() {
@@ -235,24 +303,41 @@ bool Renderer::init() {
   const unsigned int mesh_fs = compile_shader(kGlFragmentShader, kMeshFragmentShader);
   const unsigned int sky_vs = compile_shader(kGlVertexShader, kSkyVertexShader);
   const unsigned int sky_fs = compile_shader(kGlFragmentShader, kSkyFragmentShader);
+  const unsigned int ray_vs = compile_shader(kGlVertexShader, kRaytraceVertexShader);
+  const unsigned int ray_fs = compile_shader(kGlFragmentShader, kRaytraceFragmentShader);
 
-  if (!mesh_vs || !mesh_fs || !sky_vs || !sky_fs) {
+  if (!mesh_vs || !mesh_fs || !sky_vs || !sky_fs || !ray_vs || !ray_fs) {
     return false;
   }
 
   mesh_program_ = link_program(mesh_vs, mesh_fs);
   sky_program_ = link_program(sky_vs, sky_fs);
+  raytrace_program_ = link_program(ray_vs, ray_fs);
 
   gl::delete_shader(mesh_vs);
   gl::delete_shader(mesh_fs);
   gl::delete_shader(sky_vs);
   gl::delete_shader(sky_fs);
+  gl::delete_shader(ray_vs);
+  gl::delete_shader(ray_fs);
 
-  if (!mesh_program_ || !sky_program_) {
+  if (!mesh_program_ || !sky_program_ || !raytrace_program_) {
+    return false;
+  }
+
+  if (!create_samurai_programs(skinned_program_, rigid_program_)) {
+    std::fprintf(stderr, "Failed to create samurai shader programs\n");
+    return false;
+  }
+
+  if (!samurai_.load()) {
+    std::fprintf(stderr, "Failed to load samurai asset\n");
     return false;
   }
 
   mesh_mvp_location_ = gl::get_uniform_location(mesh_program_, "uMVP");
+  mesh_model_location_ = gl::get_uniform_location(mesh_program_, "uModel");
+  mesh_light_location_ = gl::get_uniform_location(mesh_program_, "uLightDir");
 
   sky_camera_pos_location_ = gl::get_uniform_location(sky_program_, "uCameraPos");
   sky_camera_right_location_ = gl::get_uniform_location(sky_program_, "uCameraRight");
@@ -262,11 +347,13 @@ bool Renderer::init() {
   sky_aspect_location_ = gl::get_uniform_location(sky_program_, "uAspect");
   sky_sun_dir_location_ = gl::get_uniform_location(sky_program_, "uSunDir");
   sky_time_location_ = gl::get_uniform_location(sky_program_, "uSkyTime");
+  ray_aspect_location_ = gl::get_uniform_location(raytrace_program_, "uAspect");
 
   vao_ = gl::create_vertex_array();
   gl::bind_vertex_array(vao_);
   gl::enable_vertex_attrib_array(0);
   gl::enable_vertex_attrib_array(1);
+  gl::enable_vertex_attrib_array(2);
 
   sky_vao_ = gl::create_vertex_array();
   gl::bind_vertex_array(sky_vao_);
@@ -280,42 +367,24 @@ bool Renderer::init() {
   gl::vertex_attrib_pointer(0, 2, kGlFloat, kGlFalse, 2 * static_cast<int>(sizeof(float)), nullptr);
 
   const std::vector<float> arena_vertices = build_arena();
-  const std::vector<float> torso_vertices = build_character_torso();
-  const std::vector<float> left_leg_vertices = build_left_leg();
-  const std::vector<float> right_leg_vertices = build_right_leg();
-  const std::vector<float> weapon_arm_vertices = build_weapon_arm();
-  const std::vector<float> sword_vertices = build_sword_mesh();
   const std::vector<float> dummy_post_vertices = build_dummy_post();
   const std::vector<float> dummy_body_vertices = build_dummy_body();
 
   arena_vertex_count_ = static_cast<int>(arena_vertices.size() / kVertexFloats);
-  torso_vertex_count_ = static_cast<int>(torso_vertices.size() / kVertexFloats);
-  leg_vertex_count_ = static_cast<int>(left_leg_vertices.size() / kVertexFloats);
-  weapon_arm_vertex_count_ = static_cast<int>(weapon_arm_vertices.size() / kVertexFloats);
-  sword_vertex_count_ = static_cast<int>(sword_vertices.size() / kVertexFloats);
   dummy_post_vertex_count_ = static_cast<int>(dummy_post_vertices.size() / kVertexFloats);
   dummy_body_vertex_count_ = static_cast<int>(dummy_body_vertices.size() / kVertexFloats);
 
   gl::gen_buffers(1, &arena_vbo_);
-  gl::gen_buffers(1, &torso_vbo_);
-  gl::gen_buffers(1, &left_leg_vbo_);
-  gl::gen_buffers(1, &right_leg_vbo_);
-  gl::gen_buffers(1, &weapon_arm_vbo_);
-  gl::gen_buffers(1, &sword_vbo_);
   gl::gen_buffers(1, &dummy_post_vbo_);
   gl::gen_buffers(1, &dummy_body_vbo_);
 
   upload_mesh(arena_vbo_, arena_vertices);
-  upload_mesh(torso_vbo_, torso_vertices);
-  upload_mesh(left_leg_vbo_, left_leg_vertices);
-  upload_mesh(right_leg_vbo_, right_leg_vertices);
-  upload_mesh(weapon_arm_vbo_, weapon_arm_vertices);
-  upload_mesh(sword_vbo_, sword_vertices);
   upload_mesh(dummy_post_vbo_, dummy_post_vertices);
   upload_mesh(dummy_body_vbo_, dummy_body_vertices);
 
   gl::enable(kGlDepthTest);
   gl::depth_func(kGlLess);
+  gl::disable_cull_face();
   gl::clear_color(0.0f, 0.0f, 0.0f, 1.0f);
 
   return true;
@@ -332,12 +401,17 @@ void Renderer::bind_mesh_vbo(unsigned int vbo) {
   constexpr int stride = kVertexFloats * static_cast<int>(sizeof(float));
   gl::vertex_attrib_pointer(0, 3, kGlFloat, kGlFalse, stride, nullptr);
   gl::vertex_attrib_pointer(1, 3, kGlFloat, kGlFalse, stride,
+                            reinterpret_cast<const void *>(3 * sizeof(float)));
+  gl::vertex_attrib_pointer(2, 3, kGlFloat, kGlFalse, stride,
                             reinterpret_cast<const void *>(6 * sizeof(float)));
 }
 
-void Renderer::draw_mesh(const Mat4 &mvp, unsigned int vbo, int vertex_count) {
+void Renderer::draw_lit_mesh(const Mat4 &mvp, const Mat4 &model, unsigned int vbo,
+                             int vertex_count) {
   bind_mesh_vbo(vbo);
   gl::uniform_matrix4fv(mesh_mvp_location_, 1, kGlFalse, mvp.m);
+  gl::uniform_matrix4fv(mesh_model_location_, 1, kGlFalse, model.m);
+  gl::uniform3f(mesh_light_location_, kSunDirX, kSunDirY, kSunDirZ);
   gl::draw_arrays(kGlTriangles, 0, vertex_count);
 }
 
@@ -348,23 +422,19 @@ void Renderer::draw_scene_meshes(const Mat4 &projection, const Mat4 &view,
   gl::bind_vertex_array(vao_);
   gl::enable_vertex_attrib_array(0);
   gl::enable_vertex_attrib_array(1);
+  gl::enable_vertex_attrib_array(2);
 
-  const Mat4 mvp = projection * view;
-  draw_mesh(mvp, arena_vbo_, arena_vertex_count_);
-  draw_mesh(mvp * transforms.dummy_model, dummy_post_vbo_, dummy_post_vertex_count_);
+  const Mat4 vp = projection * view;
+  draw_lit_mesh(vp, Mat4::identity(), arena_vbo_, arena_vertex_count_);
+  draw_lit_mesh(vp * transforms.dummy_model, transforms.dummy_model, dummy_post_vbo_,
+                dummy_post_vertex_count_);
   if (scene.dummy_alive) {
-    draw_mesh(mvp * transforms.dummy_model * transforms.dummy_body_local,
-              dummy_body_vbo_, dummy_body_vertex_count_);
+    const Mat4 body_model = transforms.dummy_model * transforms.dummy_body_local;
+    draw_lit_mesh(vp * body_model, body_model, dummy_body_vbo_, dummy_body_vertex_count_);
   }
-  draw_mesh(mvp * transforms.player_model * transforms.left_leg_local,
-            left_leg_vbo_, leg_vertex_count_);
-  draw_mesh(mvp * transforms.player_model * transforms.right_leg_local,
-            right_leg_vbo_, leg_vertex_count_);
-  draw_mesh(mvp * transforms.player_model, torso_vbo_, torso_vertex_count_);
-  draw_mesh(mvp * transforms.player_model * transforms.weapon_arm_local,
-            weapon_arm_vbo_, weapon_arm_vertex_count_);
-  draw_mesh(mvp * transforms.player_model * transforms.weapon_arm_local,
-            sword_vbo_, sword_vertex_count_);
+
+  const Mat4 player_model = player_model_matrix(scene);
+  samurai_.draw(skinned_program_, rigid_program_, projection, view, player_model);
 }
 
 void Renderer::draw_sky(const OrbitCamera &camera, float aspect, float time) {
@@ -384,6 +454,49 @@ void Renderer::draw_sky(const OrbitCamera &camera, float aspect, float time) {
 
   gl::draw_arrays(kGlTriangles, 0, 3);
   gl::depth_mask(1);
+}
+
+void Renderer::draw_raytrace(float aspect) {
+  gl::disable(kGlDepthTest);
+  gl::depth_mask(0);
+  gl::use_program(raytrace_program_);
+  if (ray_aspect_location_ >= 0) {
+    gl::uniform1f(ray_aspect_location_, aspect);
+  }
+  gl::bind_vertex_array(sky_vao_);
+  gl::draw_arrays(kGlTriangles, 0, 3);
+  gl::depth_mask(1);
+  gl::enable(kGlDepthTest);
+}
+
+void Renderer::update_samurai(const SceneDrawParams &scene) {
+  samurai_.update(scene.delta_time, scene.moving, scene.sprinting, scene.swinging, scene.dodging,
+                  scene.toggle_equip, scene.move_forward, scene.move_right);
+}
+
+float Renderer::swing_clip_duration() const {
+  return samurai_.swing_clip_duration();
+}
+
+bool Renderer::sword_drawn() const {
+  return samurai_.sword_drawn();
+}
+
+bool Renderer::can_swing() const {
+  return samurai_.can_swing();
+}
+
+bool Renderer::action_overrides_sprint() const {
+  return samurai_.action_overrides_sprint();
+}
+
+bool Renderer::equip_active() const {
+  return samurai_.equip_active();
+}
+
+bool Renderer::sword_tip_world(const SceneDrawParams &scene, float &x, float &y,
+                               float &z) const {
+  return samurai_.sword_tip_world(player_model_matrix(scene), x, y, z);
 }
 
 void Renderer::draw(const SceneDrawParams &scene) {
@@ -406,16 +519,15 @@ void Renderer::draw(const SceneDrawParams &scene) {
 }
 
 void Renderer::shutdown() {
+  samurai_.shutdown();
   mesh_program_ = 0;
+  skinned_program_ = 0;
+  rigid_program_ = 0;
   sky_program_ = 0;
+  raytrace_program_ = 0;
   vao_ = 0;
   sky_vao_ = 0;
   arena_vbo_ = 0;
-  torso_vbo_ = 0;
-  left_leg_vbo_ = 0;
-  right_leg_vbo_ = 0;
-  weapon_arm_vbo_ = 0;
-  sword_vbo_ = 0;
   dummy_post_vbo_ = 0;
   dummy_body_vbo_ = 0;
   sky_vbo_ = 0;

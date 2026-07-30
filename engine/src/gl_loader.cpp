@@ -38,6 +38,8 @@ using GLUniform1iProc = void (*)(int, int);
 using GLUniform2fProc = void (*)(int, float, float);
 using GLUniform3fProc = void (*)(int, float, float, float);
 using GLDrawArraysProc = void (*)(unsigned int, int, int);
+using GLVertexAttribIPointerProc = void (*)(unsigned int, int, unsigned int, int, const void *);
+using GLDrawElementsProc = void (*)(unsigned int, int, unsigned int, const void *);
 using GLGenFramebuffersProc = void (*)(int, unsigned int *);
 using GLBindFramebufferProc = void (*)(unsigned int, unsigned int);
 using GLFramebufferTexture2DProc = void (*)(unsigned int, unsigned int, unsigned int, unsigned int, int);
@@ -100,6 +102,8 @@ GLUniform1iProc glUniform1i_fn = nullptr;
 GLUniform2fProc glUniform2f_fn = nullptr;
 GLUniform3fProc glUniform3f_fn = nullptr;
 GLDrawArraysProc glDrawArrays_fn = nullptr;
+GLVertexAttribIPointerProc glVertexAttribIPointer_fn = nullptr;
+GLDrawElementsProc glDrawElements_fn = nullptr;
 GLGenFramebuffersProc glGenFramebuffers_fn = nullptr;
 GLBindFramebufferProc glBindFramebuffer_fn = nullptr;
 GLFramebufferTexture2DProc glFramebufferTexture2D_fn = nullptr;
@@ -160,6 +164,8 @@ bool load() {
     LOAD_GL(glUniform2f, glUniform2f_fn, GLUniform2fProc);
     LOAD_GL(glUniform3f, glUniform3f_fn, GLUniform3fProc);
     LOAD_GL(glDrawArrays, glDrawArrays_fn, GLDrawArraysProc);
+    LOAD_GL(glVertexAttribIPointer, glVertexAttribIPointer_fn, GLVertexAttribIPointerProc);
+    LOAD_GL(glDrawElements, glDrawElements_fn, GLDrawElementsProc);
     LOAD_GL(glGenFramebuffers, glGenFramebuffers_fn, GLGenFramebuffersProc);
     LOAD_GL(glBindFramebuffer, glBindFramebuffer_fn, GLBindFramebufferProc);
     LOAD_GL(glFramebufferTexture2D, glFramebufferTexture2D_fn, GLFramebufferTexture2DProc);
@@ -237,13 +243,38 @@ int get_uniform_location(unsigned int program, const char *name) {
     return glGetUniformLocation_fn(program, name);
 }
 void uniform_matrix4fv(int location, int count, unsigned char transpose, const float *value) {
-    glUniformMatrix4fv_fn(location, count, transpose, value);
+    if (location >= 0) {
+        glUniformMatrix4fv_fn(location, count, transpose, value);
+    }
 }
-void uniform1f(int location, float value) { glUniform1f_fn(location, value); }
-void uniform1i(int location, int value) { glUniform1i_fn(location, value); }
-void uniform2f(int location, float x, float y) { glUniform2f_fn(location, x, y); }
-void uniform3f(int location, float x, float y, float z) { glUniform3f_fn(location, x, y, z); }
+void uniform1f(int location, float value) {
+    if (location >= 0) {
+        glUniform1f_fn(location, value);
+    }
+}
+void uniform1i(int location, int value) {
+    if (location >= 0) {
+        glUniform1i_fn(location, value);
+    }
+}
+void uniform2f(int location, float x, float y) {
+    if (location >= 0) {
+        glUniform2f_fn(location, x, y);
+    }
+}
+void uniform3f(int location, float x, float y, float z) {
+    if (location >= 0) {
+        glUniform3f_fn(location, x, y, z);
+    }
+}
 void draw_arrays(unsigned int mode, int first, int count) { glDrawArrays_fn(mode, first, count); }
+void vertex_attrib_ipointer(unsigned int index, int size, unsigned int type, int stride,
+                            const void *pointer) {
+    glVertexAttribIPointer_fn(index, size, type, stride, pointer);
+}
+void draw_elements(unsigned int mode, int count, unsigned int type, const void *indices) {
+    glDrawElements_fn(mode, count, type, indices);
+}
 
 void gen_framebuffers(int n, unsigned int *ids) { glGenFramebuffers_fn(n, ids); }
 void bind_framebuffer(unsigned int target, unsigned int framebuffer) {
