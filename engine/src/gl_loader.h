@@ -21,6 +21,7 @@ void draw_buffers(int n, const unsigned int *bufs);
 unsigned int create_vertex_array();
 void bind_vertex_array(unsigned int vao);
 void gen_buffers(int n, unsigned int *buffers);
+void delete_buffer(int n, const unsigned int *buffers);
 void bind_buffer(unsigned int target, unsigned int buffer);
 void buffer_data(unsigned int target, long long size, const void *data, unsigned int usage);
 void vertex_attrib_pointer(unsigned int index, int size, unsigned int type,

@@ -98,6 +98,17 @@ struct Mat4 {
         return out;
     }
 
+    static Mat4 rotate_z(float radians) {
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        Mat4 out = identity();
+        out.m[0] = c;
+        out.m[1] = -s;
+        out.m[4] = s;
+        out.m[5] = c;
+        return out;
+    }
+
     static Mat4 translate(float x, float y, float z) {
         Mat4 out = identity();
         out.m[12] = x;

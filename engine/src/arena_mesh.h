@@ -30,6 +30,7 @@ constexpr float kMaxStepHeight = 0.26f;
 constexpr float kSupportEpsilon = 0.06f;
 constexpr float kPlayerRadius = 0.18f;
 constexpr float kPlayerHeight = 1.50f;
+constexpr float kWorldHalfExtent = 18.0f;
 
 inline void append_rock_cluster(std::vector<float> &out,
                                 float cx, float cz,
@@ -158,8 +159,19 @@ inline std::vector<float> build_arena() {
   constexpr float rock[] = {0.48f, 0.44f, 0.40f};
   constexpr float rock_dark[] = {0.38f, 0.35f, 0.32f};
   constexpr float stone[] = {0.58f, 0.55f, 0.50f};
+  constexpr float boundary[] = {0.30f, 0.27f, 0.24f};
 
   append_box(vertices, 0.0f, -0.05f, 0.0f, 18.0f, 0.05f, 18.0f, sand[0], sand[1], sand[2]);
+
+  // Visible perimeter marking the same hard world limits used by collision.
+  append_box(vertices, 0.0f, 0.45f, -17.85f, 18.0f, 0.45f, 0.15f,
+             boundary[0], boundary[1], boundary[2]);
+  append_box(vertices, 0.0f, 0.45f, 17.85f, 18.0f, 0.45f, 0.15f,
+             boundary[0], boundary[1], boundary[2]);
+  append_box(vertices, -17.85f, 0.45f, 0.0f, 0.15f, 0.45f, 18.0f,
+             boundary[0], boundary[1], boundary[2]);
+  append_box(vertices, 17.85f, 0.45f, 0.0f, 0.15f, 0.45f, 18.0f,
+             boundary[0], boundary[1], boundary[2]);
 
   append_box(vertices, 0.0f, 0.08f, 0.0f, 4.0f, 0.08f, 4.0f, stone[0], stone[1], stone[2]);
   append_box(vertices, -6.0f, 0.35f, 5.0f, 1.8f, 0.35f, 1.4f, stone[0], stone[1], stone[2]);
@@ -192,7 +204,30 @@ inline bool aabb_overlaps(float ax0, float ax1, float ay0, float ay1, float az0,
   return ax0 < bx1 && ax1 > bx0 && ay0 < by1 && ay1 > by0 && az0 < bz1 && az1 > bz0;
 }
 
+inline bool is_projectile_blocked(float x, float y, float z, float radius = 0.025f) {
+  if (y - radius <= 0.0f) {
+    return true;
+  }
+  if (x - radius <= -kWorldHalfExtent || x + radius >= kWorldHalfExtent ||
+      z - radius <= -kWorldHalfExtent || z + radius >= kWorldHalfExtent) {
+    return true;
+  }
+  for (const SolidBox &box : solid_boxes()) {
+    if (aabb_overlaps(x - radius, x + radius, y - radius, y + radius,
+                      z - radius, z + radius, box.min_x, box.max_x,
+                      box.min_y, box.max_y, box.min_z, box.max_z)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 inline bool is_position_blocked(float x, float y, float z) {
+  const float player_limit = kWorldHalfExtent - kPlayerRadius;
+  if (x <= -player_limit || x >= player_limit ||
+      z <= -player_limit || z >= player_limit) {
+    return true;
+  }
   const float px0 = x - kPlayerRadius;
   const float px1 = x + kPlayerRadius;
   const float py0 = y;
@@ -262,6 +297,9 @@ inline float resolve_support_height(float x, float z, float y, float vy) {
 
 inline void depenetrate(float &x, float &y, float &z) {
   constexpr float kSkin = 0.01f;
+  const float player_limit = kWorldHalfExtent - kPlayerRadius - kSkin;
+  x = std::clamp(x, -player_limit, player_limit);
+  z = std::clamp(z, -player_limit, player_limit);
 
   for (int iteration = 0; iteration < 8; ++iteration) {
     if (!is_position_blocked(x, y, z)) {

@@ -56,9 +56,15 @@ You should see a 1280×720 window with a slowly rotating cube. Press the window 
 - `W`, `A`, `S`, `D` move relative to where the camera is looking (on the ground plane).
 - The character turns to face the direction it is moving.
 - Left click swings the sword at the training dummy on the far side of the dais.
-- Space jumps (~3 ft high with Earth gravity).
+- Space jumps; press Space again while airborne to enter flight.
+- While flying, hold Space to rise, Ctrl to descend, and Shift to boost.
+- F toggles flight directly and can be used to exit flight.
+- V swaps the over-the-shoulder camera between the left and right sides.
 - Move the mouse to orbit the camera.
 - `Esc` closes the window.
+- `R` toggles the clean atmospheric ray mode.
+- `C` switches between the animated samurai and the experimental Pharaoh character.
+- Right click fires the Pharaoh's finger projectile in the direction he is facing.
 
 Debug build:
 

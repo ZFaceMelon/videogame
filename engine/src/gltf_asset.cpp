@@ -40,6 +40,9 @@ constexpr unsigned int kGlVertexShader = 0x8B31;
 constexpr unsigned int kGlFragmentShader = 0x8B30;
 constexpr unsigned int kGlCompileStatus = 0x8B81;
 constexpr unsigned int kGlLinkStatus = 0x8B82;
+constexpr unsigned int kGlBlend = 0x0BE2;
+constexpr unsigned int kGlSrcAlpha = 0x0302;
+constexpr unsigned int kGlOneMinusSrcAlpha = 0x0303;
 
 constexpr float kSunDirX = 0.551f;
 constexpr float kSunDirY = 0.701f;
@@ -47,6 +50,40 @@ constexpr float kSunDirZ = -0.451f;
 
 constexpr const char *kAssetFile = "samuraianimatedv1.glb";
 constexpr float kTargetHeight = 1.54f;
+
+Mat4 align_direction_to_y(float x, float y, float z) {
+  const float length = std::sqrt(x * x + y * y + z * z);
+  x /= length;
+  y /= length;
+  z /= length;
+  // Rodrigues rotation from the supplied direction to +Y.
+  float ax = -z;
+  float ay = 0.0f;
+  float az = x;
+  const float s = std::sqrt(ax * ax + az * az);
+  const float c = y;
+  if (s < 1e-5f) {
+    return c >= 0.0f ? Mat4::identity() : Mat4::rotate_x(3.1415926535f);
+  }
+  ax /= s;
+  az /= s;
+  const float one_minus_c = 1.0f - c;
+  Mat4 out = Mat4::identity();
+  out.m[0] = c + ax * ax * one_minus_c;
+  out.m[4] = ax * ay * one_minus_c - az * s;
+  out.m[8] = ax * az * one_minus_c + ay * s;
+  out.m[1] = ay * ax * one_minus_c + az * s;
+  out.m[5] = c + ay * ay * one_minus_c;
+  out.m[9] = ay * az * one_minus_c - ax * s;
+  out.m[2] = az * ax * one_minus_c - ay * s;
+  out.m[6] = az * ay * one_minus_c + ax * s;
+  out.m[10] = c + az * az * one_minus_c;
+  return out;
+}
+
+Mat4 align_y_to_direction(float x, float y, float z) {
+  return mat4_inverse(align_direction_to_y(x, y, z));
+}
 
 constexpr const char *kSkinnedVertexShader = R"(#version 330 core
 layout (location = 0) in vec3 aPos;
@@ -56,9 +93,10 @@ layout (location = 3) in ivec4 aJoints;
 layout (location = 4) in vec4 aWeights;
 uniform mat4 uVP;
 uniform mat4 uModel;
-uniform mat4 uBones[33];
+uniform mat4 uBones[96];
 out vec2 vUv;
 out vec3 vNormal;
+out vec3 vWorldPos;
 void main() {
     mat4 skin =
         uBones[aJoints.x] * aWeights.x +
@@ -68,6 +106,7 @@ void main() {
     vec4 skinned = skin * vec4(aPos, 1.0);
     vec4 worldPos = uModel * skinned;
     gl_Position = uVP * worldPos;
+    vWorldPos = worldPos.xyz;
     vNormal = normalize(mat3(uModel) * mat3(skin) * aNormal);
     vUv = aUv;
 }
@@ -81,8 +120,11 @@ uniform mat4 uMVP;
 uniform mat4 uModel;
 out vec2 vUv;
 out vec3 vNormal;
+out vec3 vWorldPos;
 void main() {
+    vec4 worldPos = uModel * vec4(aPos, 1.0);
     gl_Position = uMVP * vec4(aPos, 1.0);
+    vWorldPos = worldPos.xyz;
     vNormal = normalize(mat3(uModel) * aNormal);
     vUv = aUv;
 }
@@ -91,11 +133,37 @@ void main() {
 constexpr const char *kTexturedFragmentShader = R"(#version 330 core
 in vec2 vUv;
 in vec3 vNormal;
+in vec3 vWorldPos;
 uniform sampler2D uDiffuse;
 uniform vec3 uLightDir;
+uniform float uOpacity;
+uniform float uDissolve;
+uniform vec3 uDissolveCenter;
+uniform float uRevealProgress;
+uniform float uRevealBaseY;
 out vec4 FragColor;
+float dissolveNoise(vec3 p) {
+    vec3 cell = floor(p * 48.0);
+    return fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
 void main() {
-    vec3 albedo = texture(uDiffuse, vUv).rgb;
+    if (uRevealProgress < 0.999) {
+        float revealEdge = uRevealBaseY + uRevealProgress * 1.62;
+        float brokenEdge = (dissolveNoise(vWorldPos * 0.85) - 0.5) * 0.08;
+        if (vWorldPos.y > revealEdge + brokenEdge) {
+            discard;
+        }
+    }
+    if (uDissolve > 0.0) {
+        float radius = length(vWorldPos - uDissolveCenter);
+        float inwardEdge = 1.30 - uDissolve * 1.36;
+        float brokenEdge = (dissolveNoise(vWorldPos) - 0.5) * 0.04;
+        if (radius + brokenEdge > inwardEdge) {
+            discard;
+        }
+    }
+    vec4 sampled = texture(uDiffuse, vUv);
+    vec3 albedo = sampled.rgb;
     vec3 n = normalize(vNormal);
     vec3 l = normalize(uLightDir);
     float ndl = max(dot(n, l), 0.0);
@@ -103,7 +171,7 @@ void main() {
     vec3 h = normalize(l + vec3(0.0, 0.0, 1.0));
     float spec = pow(max(dot(n, h), 0.0), 32.0);
     vec3 lit = albedo * (0.58 + 0.34 * ndl + 0.08 * skyFill) + vec3(0.12) * spec;
-    FragColor = vec4(lit, 1.0);
+    FragColor = vec4(lit, sampled.a * uOpacity);
 }
 )";
 
@@ -454,8 +522,16 @@ float SamuraiAsset::clip_playback_time(LocomotionState state) const {
     return run_right_time_;
   case LocomotionState::Sprint:
     return sprint_time_;
+  case LocomotionState::Jump:
+    return jump_time_;
+  case LocomotionState::Fly:
+    return fly_time_;
   case LocomotionState::Swing:
     return swing_time_;
+  case LocomotionState::Shoot:
+    return shoot_time_;
+  case LocomotionState::Ultimate:
+    return ultimate_time_;
   case LocomotionState::Equip:
     return equip_time_;
   case LocomotionState::Idle:
@@ -476,8 +552,16 @@ const SamuraiAsset::AnimationClip &SamuraiAsset::clip_for_state(LocomotionState 
     return clip_run_right_;
   case LocomotionState::Sprint:
     return clip_sprint_;
+  case LocomotionState::Jump:
+    return clip_jump_;
+  case LocomotionState::Fly:
+    return clip_fly_;
   case LocomotionState::Swing:
     return clip_swing_;
+  case LocomotionState::Shoot:
+    return clip_shoot_;
+  case LocomotionState::Ultimate:
+    return clip_ultimate_;
   case LocomotionState::Equip:
     return clip_equip_;
   case LocomotionState::Idle:
@@ -487,13 +571,26 @@ const SamuraiAsset::AnimationClip &SamuraiAsset::clip_for_state(LocomotionState 
 }
 
 SamuraiAsset::LocomotionState SamuraiAsset::choose_locomotion_state(
-    bool moving, bool sprinting, bool swinging, bool dodging,
+    bool moving, bool sprinting, bool airborne, bool flying, bool swinging,
+    bool shooting, bool ultimate, bool dodging,
     float move_forward, float move_right) const {
+  if (ultimate) {
+    return LocomotionState::Ultimate;
+  }
   if (swinging) {
     return LocomotionState::Swing;
   }
+  if (shooting) {
+    return LocomotionState::Shoot;
+  }
   if (equip_active_) {
     return LocomotionState::Equip;
+  }
+  if (flying) {
+    return LocomotionState::Fly;
+  }
+  if (airborne) {
+    return LocomotionState::Jump;
   }
   if (!moving) {
     return LocomotionState::Idle;
@@ -515,27 +612,49 @@ void SamuraiAsset::advance_clip_time(LocomotionState state, float delta_time, bo
   case LocomotionState::RunForward:
     time = &run_forward_time_;
     clip = &clip_run_forward_;
+    playback_rate = 1.70f;
     break;
   case LocomotionState::RunBack:
     time = &run_back_time_;
     clip = &clip_run_back_;
+    playback_rate = 1.70f;
     break;
   case LocomotionState::RunLeft:
     time = &run_left_time_;
     clip = &clip_run_left_;
+    playback_rate = 1.70f;
     break;
   case LocomotionState::RunRight:
     time = &run_right_time_;
     clip = &clip_run_right_;
+    playback_rate = 1.70f;
     break;
   case LocomotionState::Sprint:
     time = &sprint_time_;
     clip = &clip_sprint_;
-    playback_rate = 0.7f;
+    playback_rate = 1.45f;
+    break;
+  case LocomotionState::Jump:
+    time = &jump_time_;
+    clip = &clip_jump_;
+    playback_rate = 1.65f;
+    break;
+  case LocomotionState::Fly:
+    time = &fly_time_;
+    clip = &clip_fly_;
+    playback_rate = 1.0f;
     break;
   case LocomotionState::Swing:
     time = &swing_time_;
     clip = &clip_swing_;
+    break;
+  case LocomotionState::Shoot:
+    time = &shoot_time_;
+    clip = &clip_shoot_;
+    break;
+  case LocomotionState::Ultimate:
+    time = &ultimate_time_;
+    clip = &clip_ultimate_;
     break;
   case LocomotionState::Equip:
     time = &equip_time_;
@@ -693,6 +812,12 @@ void SamuraiAsset::sample_animation(int animation_index, float time,
       }
     }
   }
+  if (lock_root_motion_ && root_motion_node_ >= 0 &&
+      root_motion_node_ < static_cast<int>(out.size())) {
+    NodePose &root = out[static_cast<std::size_t>(root_motion_node_)];
+    const NodePose &rest = rest_poses_[static_cast<std::size_t>(root_motion_node_)];
+    std::memcpy(root.translation, rest.translation, sizeof(root.translation));
+  }
 }
 
 void SamuraiAsset::update_global_matrices() {
@@ -826,6 +951,69 @@ Mat4 SamuraiAsset::katana_world_matrix() const {
   if (socket_node < 0 || node_katana_ < 0) {
     return Mat4::identity();
   }
+  if (keep_weapon_upright_) {
+    const Mat4 hand = node_global_matrix(socket_node);
+    const Mat4 one_hand_staff = hand * weapon_hand_attachment_;
+    if (locomotion_ == LocomotionState::Ultimate) {
+      // The power-up pose presents the staff as a vertical focus. Preserve
+      // the hand-attached grip position but replace animation tilt with the
+      // calibrated upright staff basis.
+      Mat4 vertical_staff = upright_weapon_basis_;
+      vertical_staff.m[12] = hand.m[12];
+      vertical_staff.m[13] = one_hand_staff.m[13] + 0.08f;
+      vertical_staff.m[14] = hand.m[14];
+      if (node_lefthand_ >= 0) {
+        const Mat4 left_hand = node_global_matrix(node_lefthand_);
+        // A vertical shaft cannot follow a diagonal hand-to-hand line. Move
+        // its upright axis between the two palms so both hands close around
+        // it instead of leaving it beside the power-up pose.
+        vertical_staff.m[12] = (hand.m[12] + left_hand.m[12]) * 0.50f;
+        vertical_staff.m[14] = (hand.m[14] + left_hand.m[14]) * 0.50f;
+      }
+      return vertical_staff;
+    }
+    if (node_lefthand_ >= 0) {
+      const Mat4 left_hand = node_global_matrix(node_lefthand_);
+      const float direction_x = left_hand.m[12] - hand.m[12];
+      const float direction_y = left_hand.m[13] - hand.m[13];
+      const float direction_z = left_hand.m[14] - hand.m[14];
+      const float hand_separation = std::sqrt(direction_x * direction_x +
+                                              direction_y * direction_y +
+                                              direction_z * direction_z);
+      if (hand_separation > 1e-4f) {
+        constexpr float kFrontHandGripClearance = 0.14f;
+        const float hand_direction_x = direction_x / hand_separation;
+        const float hand_direction_y = direction_y / hand_separation;
+        const float hand_direction_z = direction_z / hand_separation;
+        constexpr float staff_axis_x = 0.248998f;
+        constexpr float staff_axis_y = 0.439192f;
+        constexpr float staff_axis_z = 0.863198f;
+        const float current_axis_x = one_hand_staff.m[0] * staff_axis_x +
+                                     one_hand_staff.m[4] * staff_axis_y +
+                                     one_hand_staff.m[8] * staff_axis_z;
+        const float current_axis_y = one_hand_staff.m[1] * staff_axis_x +
+                                     one_hand_staff.m[5] * staff_axis_y +
+                                     one_hand_staff.m[9] * staff_axis_z;
+        const float current_axis_z = one_hand_staff.m[2] * staff_axis_x +
+                                     one_hand_staff.m[6] * staff_axis_y +
+                                     one_hand_staff.m[10] * staff_axis_z;
+        const Mat4 aim_staff_at_left_hand =
+            align_y_to_direction(direction_x, direction_y, direction_z) *
+            align_direction_to_y(current_axis_x, current_axis_y, current_axis_z);
+        // Rotate the already-correct full-length staff around the right-hand
+        // grip. This preserves its scale and placement while making the shaft
+        // pass in the left hand's direction.
+        return Mat4::translate(hand_direction_x * kFrontHandGripClearance,
+                               hand_direction_y * kFrontHandGripClearance,
+                               hand_direction_z * kFrontHandGripClearance) *
+               Mat4::translate(hand.m[12], hand.m[13], hand.m[14]) *
+               aim_staff_at_left_hand *
+               Mat4::translate(-hand.m[12], -hand.m[13], -hand.m[14]) *
+               one_hand_staff;
+      }
+    }
+    return one_hand_staff;
+  }
   return node_global_matrix(socket_node) * node_local_matrix(node_katana_, rest_poses_);
 }
 
@@ -842,8 +1030,9 @@ bool SamuraiAsset::katana_attached_to_hand() const {
   return equip_time_ < equip_swap_time_;
 }
 
-bool SamuraiAsset::load() {
-  asset_path_ = resolve_asset_path(kAssetFile);
+bool SamuraiAsset::load(const char *filename) {
+  asset_path_ = resolve_asset_path(filename ? filename : kAssetFile);
+  lock_root_motion_ = filename && std::strstr(filename, "pharaoh") != nullptr;
   file_bytes_ = read_binary_file(asset_path_);
   if (file_bytes_.empty()) {
     std::fprintf(stderr, "Failed to read asset: %s\n", asset_path_.c_str());
@@ -870,7 +1059,16 @@ bool SamuraiAsset::load() {
   node_sheath_ = find_node("sheath");
   node_katana_ = find_node("mesh_input");
   node_sockethand_ = find_node("sockethand");
+  if (node_sockethand_ < 0) {
+    node_sockethand_ = find_node("mixamorig:RightHand");
+  }
+  node_lefthand_ = find_node("mixamorig:LeftHand");
   node_socketsheath_ = find_node("socketsheath");
+  node_fingertip_ = find_node("mixamorig:RightHandIndex4_end");
+  if (node_fingertip_ < 0) {
+    node_fingertip_ = find_node("mixamorig:RightHandIndex4");
+  }
+  root_motion_node_ = find_node("mixamorig:Hips");
 
   cache_rest_poses();
   clip_idle_ = find_clip("breathingidle", true);
@@ -879,10 +1077,31 @@ bool SamuraiAsset::load() {
   clip_run_left_ = find_clip("combatwalkleft", true);
   clip_run_right_ = find_clip("combatwalkright", true);
   clip_sprint_ = find_clip("fastrun", true);
-  clip_swing_ = find_clip("overheadslash", false);
+  clip_jump_ = lock_root_motion_
+                   ? find_clip("Armature|Armature|flying_kick", false)
+                   : find_clip("twistflip", false);
+  clip_fly_ = lock_root_motion_
+                  ? find_clip("Armature|Armature|flying", true)
+                  : find_clip("twistflip", true);
+  clip_swing_ = lock_root_motion_
+                    ? find_clip("Armature|Armature|staff_smash", false)
+                    : find_clip("overheadslash", false);
+  clip_shoot_ = lock_root_motion_
+                    ? find_clip("Armature|Armature|finger_shoot_position", false)
+                    : AnimationClip{};
+  clip_ultimate_ = lock_root_motion_
+                       ? find_clip("Armature|Armature|ultimate", false)
+                       : clip_swing_;
   clip_equip_ = find_clip("onearmequip", false);
   if (clip_sprint_.animation_index < 0) {
     clip_sprint_ = clip_run_forward_;
+  }
+  if (clip_jump_.animation_index < 0) {
+    clip_jump_ = clip_run_forward_;
+    clip_jump_.loop = false;
+  }
+  if (clip_fly_.animation_index < 0) {
+    clip_fly_ = clip_idle_;
   }
   if (clip_run_back_.animation_index < 0) {
     clip_run_back_ = clip_run_forward_;
@@ -923,6 +1142,27 @@ bool SamuraiAsset::load() {
   }
 
   compute_model_fixup();
+
+  keep_weapon_upright_ = lock_root_motion_ && node_sockethand_ >= 0 && node_katana_ >= 0;
+  if (keep_weapon_upright_) {
+    update_global_matrices();
+    const Mat4 hand = node_global_matrix(node_sockethand_);
+    const Mat4 weapon = node_global_matrix(node_katana_);
+    // The exported staff mesh is authored with its long local Y axis upright.
+    // Preserve only its animated hand-relative position here; carrying the
+    // Mixamo bind-pose rotation into locomotion tilts it across the face.
+    // PCA was measured after Blender's glTF import (Z-up). Convert that axis
+    // back to the engine/glTF Y-up basis before aligning it to world-up.
+    upright_weapon_basis_ = align_direction_to_y(0.248998f, 0.439192f, 0.863198f);
+    Mat4 calibrated_staff = upright_weapon_basis_;
+    calibrated_staff.m[12] = weapon.m[12];
+    calibrated_staff.m[13] = weapon.m[13];
+    calibrated_staff.m[14] = weapon.m[14];
+    // Store the corrected staff pose in hand-local space. During the smash,
+    // multiplying it by the animated hand makes position and rotation follow
+    // the grip instead of leaving the staff upright in world space.
+    weapon_hand_attachment_ = mat4_inverse(hand) * calibrated_staff;
+  }
 
   textures_.assign(data->textures_count, 0);
   std::vector<unsigned int> image_textures(data->images_count, 0);
@@ -980,6 +1220,29 @@ bool SamuraiAsset::load() {
                   kGlUnsignedByteType, white);
   gl::texParameteri(kGlTexture2D, 0x2801, kGlLinear);
   gl::texParameteri(kGlTexture2D, 0x2800, kGlLinear);
+
+  material_color_textures_.assign(data->materials_count, 0);
+  for (cgltf_size i = 0; i < data->materials_count; ++i) {
+    const cgltf_material &material = data->materials[i];
+    float color[4]{1.0f, 1.0f, 1.0f, 1.0f};
+    if (material.has_pbr_metallic_roughness) {
+      std::memcpy(color, material.pbr_metallic_roughness.base_color_factor,
+                  sizeof(color));
+    }
+    const unsigned char pixel[] = {
+        static_cast<unsigned char>(std::clamp(color[0], 0.0f, 1.0f) * 255.0f),
+        static_cast<unsigned char>(std::clamp(color[1], 0.0f, 1.0f) * 255.0f),
+        static_cast<unsigned char>(std::clamp(color[2], 0.0f, 1.0f) * 255.0f),
+        static_cast<unsigned char>(std::clamp(color[3], 0.0f, 1.0f) * 255.0f)};
+    unsigned int texture = 0;
+    gl::gen_textures(1, &texture);
+    gl::bind_texture(kGlTexture2D, texture);
+    gl::tex_image2d(kGlTexture2D, 0, static_cast<int>(kGlRgba), 1, 1, 0, kGlRgba,
+                    kGlUnsignedByteType, pixel);
+    gl::texParameteri(kGlTexture2D, 0x2801, kGlLinear);
+    gl::texParameteri(kGlTexture2D, 0x2800, kGlLinear);
+    material_color_textures_[i] = texture;
+  }
 
   auto upload_primitive = [&](const cgltf_primitive &prim, bool skinned, SkinnedMeshGpu *skinned_out,
                               RigidMeshGpu *rigid_out, int node_index) -> bool {
@@ -1111,10 +1374,13 @@ bool SamuraiAsset::load() {
   };
 
   const cgltf_mesh *body_mesh = samurai_node->mesh;
-  const cgltf_primitive &samurai_prim = body_mesh->primitives[0];
-  if (!upload_primitive(samurai_prim, true, &samurai_mesh_, nullptr, node_samurai_)) {
-    std::fprintf(stderr, "Failed to upload samurai mesh\n");
-    return false;
+  for (cgltf_size i = 0; i < body_mesh->primitives_count; ++i) {
+    SkinnedMeshGpu part{};
+    if (!upload_primitive(body_mesh->primitives[i], true, &part, nullptr, node_samurai_)) {
+      std::fprintf(stderr, "Failed to upload animated character mesh part %zu\n", i);
+      return false;
+    }
+    skinned_meshes_.push_back(part);
   }
 
   if (node_sheath_ >= 0 && data->nodes[node_sheath_].mesh) {
@@ -1134,12 +1400,18 @@ bool SamuraiAsset::load() {
     }
   }
 
-  std::fprintf(stderr, "Loaded samurai from %s (scale %.4f, bones %zu)\n", asset_path_.c_str(),
+  std::fprintf(stderr, "Loaded animated character from %s (scale %.4f, bones %zu)\n", asset_path_.c_str(),
                scale_, inverse_bind_.size());
   return true;
 }
 
 void SamuraiAsset::shutdown() {
+  for (unsigned int texture : material_color_textures_) {
+    if (texture != 0) {
+      gl::delete_textures(1, &texture);
+    }
+  }
+  material_color_textures_.clear();
   if (fallback_texture_ != 0) {
     gl::delete_textures(1, &fallback_texture_);
     fallback_texture_ = 0;
@@ -1151,12 +1423,15 @@ void SamuraiAsset::shutdown() {
   file_bytes_.clear();
   asset_path_.clear();
   textures_.clear();
-  samurai_mesh_ = {};
+  skinned_meshes_.clear();
   rigid_meshes_.clear();
 }
 
-void SamuraiAsset::update(float delta_time, bool moving, bool sprinting, bool swinging, bool dodging,
-                          bool toggle_equip, float move_forward, float move_right) {
+void SamuraiAsset::update(float delta_time, bool moving, bool sprinting, bool airborne,
+                          bool flying, bool swinging, bool shooting, bool ultimate, bool dodging,
+                          bool toggle_equip,
+                          float move_forward, float move_right) {
+  staff_dismiss_time_ = std::max(0.0f, staff_dismiss_time_ - delta_time);
   if (toggle_equip && !equip_active_ && !swinging && !dodging) {
     if (clip_equip_.animation_index >= 0) {
       equip_active_ = true;
@@ -1168,19 +1443,41 @@ void SamuraiAsset::update(float delta_time, bool moving, bool sprinting, bool sw
   }
 
   const LocomotionState target =
-      choose_locomotion_state(moving, sprinting, swinging, dodging, move_forward, move_right);
+      choose_locomotion_state(moving, sprinting, airborne, flying, swinging,
+                              shooting, ultimate, dodging,
+                              move_forward, move_right);
   if (target != locomotion_) {
     const LocomotionState from = locomotion_;
+    const bool from_staff_action = from == LocomotionState::Swing ||
+                                   from == LocomotionState::Ultimate;
+    const bool to_staff_action = target == LocomotionState::Swing ||
+                                 target == LocomotionState::Ultimate;
+    if (keep_weapon_upright_ && from_staff_action && !to_staff_action) {
+      staff_dismiss_time_ = 0.32f;
+    }
     previous_locomotion_ = locomotion_;
     locomotion_ = target;
     blend_time_ = 0.0f;
     previous_poses_ = current_poses_;
     const bool from_action =
         from == LocomotionState::Idle || from == LocomotionState::Swing ||
+        from == LocomotionState::Ultimate ||
+        from == LocomotionState::Shoot || from == LocomotionState::Jump ||
+        from == LocomotionState::Fly ||
         from == LocomotionState::Equip;
     if (target == LocomotionState::Swing) {
       swing_time_ = 0.0f;
       swing_active_ = true;
+      staff_dismiss_time_ = 0.0f;
+    } else if (target == LocomotionState::Ultimate) {
+      ultimate_time_ = 0.0f;
+      staff_dismiss_time_ = 0.0f;
+    } else if (target == LocomotionState::Shoot) {
+      shoot_time_ = 0.0f;
+    } else if (target == LocomotionState::Jump) {
+      jump_time_ = 0.0f;
+    } else if (target == LocomotionState::Fly) {
+      fly_time_ = 0.0f;
     } else if (target == LocomotionState::Equip) {
       equip_time_ = 0.0f;
     } else if (target == LocomotionState::Idle) {
@@ -1213,7 +1510,12 @@ void SamuraiAsset::update(float delta_time, bool moving, bool sprinting, bool sw
   if (locomotion_ == LocomotionState::Swing &&
       swing_time_ >= clip_swing_.duration - 1e-4f) {
     swing_active_ = false;
-    locomotion_ = choose_locomotion_state(moving, sprinting, false, dodging, move_forward, move_right);
+    if (keep_weapon_upright_) {
+      staff_dismiss_time_ = 0.32f;
+    }
+    locomotion_ = choose_locomotion_state(moving, sprinting, airborne, flying,
+                                          false, shooting, ultimate, dodging,
+                                          move_forward, move_right);
     previous_locomotion_ = LocomotionState::Swing;
     blend_time_ = 0.0f;
     previous_poses_ = current_poses_;
@@ -1234,10 +1536,22 @@ void SamuraiAsset::update(float delta_time, bool moving, bool sprinting, bool sw
     }
   }
 
+  if (locomotion_ == LocomotionState::Shoot &&
+      shoot_time_ >= clip_shoot_.duration - 1e-4f) {
+    locomotion_ = choose_locomotion_state(moving, sprinting, airborne, flying,
+                                          false, false, ultimate, dodging,
+                                          move_forward, move_right);
+    previous_locomotion_ = LocomotionState::Shoot;
+    blend_time_ = 0.0f;
+    previous_poses_ = current_poses_;
+  }
+
   if (equip_active_ && equip_time_ >= clip_equip_.duration - 1e-4f) {
     sword_drawn_ = equip_drawing_;
     equip_active_ = false;
-    locomotion_ = choose_locomotion_state(moving, sprinting, false, dodging, move_forward, move_right);
+    locomotion_ = choose_locomotion_state(moving, sprinting, airborne, flying,
+                                          false, false, ultimate, dodging,
+                                          move_forward, move_right);
     previous_locomotion_ = LocomotionState::Equip;
     blend_time_ = 0.0f;
     previous_poses_ = current_poses_;
@@ -1300,7 +1614,9 @@ unsigned int SamuraiAsset::texture_for_material(int material_index) const {
   const cgltf_material &material = data->materials[material_index];
   if (!material.has_pbr_metallic_roughness ||
       !material.pbr_metallic_roughness.base_color_texture.texture) {
-    return fallback_texture_;
+    return material_index < static_cast<int>(material_color_textures_.size())
+               ? material_color_textures_[static_cast<std::size_t>(material_index)]
+               : fallback_texture_;
   }
   const cgltf_size tex_index = static_cast<cgltf_size>(
       material.pbr_metallic_roughness.base_color_texture.texture - data->textures);
@@ -1332,29 +1648,73 @@ void SamuraiAsset::upload_bone_uniforms(unsigned int program) const {
 
 void SamuraiAsset::draw(unsigned int skinned_program, unsigned int rigid_program,
                         const Mat4 &projection, const Mat4 &view,
-                        const Mat4 &player_model) {
+                        const Mat4 &player_model, bool hide_shooting_finger,
+                        float character_opacity, float character_dissolve,
+                        float character_reveal_progress) {
   const Mat4 vp = projection * view;
   const Mat4 model = player_model * model_fixup_;
 
-  if (samurai_mesh_.vao != 0) {
+  if (!skinned_meshes_.empty()) {
     gl::use_program(skinned_program);
     const int vp_loc = gl::get_uniform_location(skinned_program, "uVP");
     const int model_loc = gl::get_uniform_location(skinned_program, "uModel");
     const int tex_loc = gl::get_uniform_location(skinned_program, "uDiffuse");
     const int light_loc = gl::get_uniform_location(skinned_program, "uLightDir");
+    const int opacity_loc = gl::get_uniform_location(skinned_program, "uOpacity");
+    const int dissolve_loc = gl::get_uniform_location(skinned_program, "uDissolve");
+    const int dissolve_center_loc =
+        gl::get_uniform_location(skinned_program, "uDissolveCenter");
+    const int reveal_progress_loc =
+        gl::get_uniform_location(skinned_program, "uRevealProgress");
+    const int reveal_base_loc =
+        gl::get_uniform_location(skinned_program, "uRevealBaseY");
+    const bool translucent_character = character_opacity < 0.999f;
+    if (translucent_character) {
+      gl::enable(kGlBlend);
+      gl::blend_func(kGlSrcAlpha, kGlOneMinusSrcAlpha);
+    }
 
     gl::uniform_matrix4fv(vp_loc, 1, kGlFalse, vp.m);
     gl::uniform_matrix4fv(model_loc, 1, kGlFalse, model.m);
     gl::uniform3f(light_loc, kSunDirX, kSunDirY, kSunDirZ);
+    gl::uniform1f(dissolve_loc, character_dissolve);
+    gl::uniform3f(dissolve_center_loc, player_model.m[12],
+                  player_model.m[13] + 0.77f, player_model.m[14]);
+    gl::uniform1f(reveal_progress_loc, character_reveal_progress);
+    gl::uniform1f(reveal_base_loc, player_model.m[13]);
     upload_bone_uniforms(skinned_program);
 
-    const unsigned int tex = texture_for_material(samurai_mesh_.material_index);
-    gl::active_texture(kGlTexture0);
-    gl::bind_texture(kGlTexture2D, tex);
-    gl::uniform1i(tex_loc, 0);
+    const auto *data = static_cast<const cgltf_data *>(data_);
+    const auto is_hidden_finger = [hide_shooting_finger, data](const SkinnedMeshGpu &mesh) {
+      if (!hide_shooting_finger || !data || mesh.material_index < 0 ||
+          mesh.material_index >= static_cast<int>(data->materials_count)) {
+        return false;
+      }
+      const char *name = data->materials[mesh.material_index].name;
+      return name && std::strstr(name, "sand_finger") != nullptr;
+    };
+    const auto draw_skinned_mesh = [&](const SkinnedMeshGpu &mesh, float opacity) {
+      const unsigned int tex = texture_for_material(mesh.material_index);
+      gl::active_texture(kGlTexture0);
+      gl::bind_texture(kGlTexture2D, tex);
+      gl::uniform1i(tex_loc, 0);
+      gl::uniform1f(opacity_loc, opacity);
+      gl::bind_vertex_array(mesh.vao);
+      gl::draw_elements(kGlTriangles, mesh.index_count, mesh.index_type, nullptr);
+    };
 
-    gl::bind_vertex_array(samurai_mesh_.vao);
-    gl::draw_elements(kGlTriangles, samurai_mesh_.index_count, samurai_mesh_.index_type, nullptr);
+    // Once the projectile releases, omit the dedicated finger primitive so
+    // the source finger vanishes on precisely the same rendered frame.
+    if (character_opacity > 0.001f) {
+      for (const SkinnedMeshGpu &mesh : skinned_meshes_) {
+        if (!is_hidden_finger(mesh)) {
+          draw_skinned_mesh(mesh, character_opacity);
+        }
+      }
+    }
+    if (translucent_character) {
+      gl::disable(kGlBlend);
+    }
   }
 
   gl::use_program(rigid_program);
@@ -1362,9 +1722,31 @@ void SamuraiAsset::draw(unsigned int skinned_program, unsigned int rigid_program
   const int model_loc = gl::get_uniform_location(rigid_program, "uModel");
   const int tex_loc = gl::get_uniform_location(rigid_program, "uDiffuse");
   const int light_loc = gl::get_uniform_location(rigid_program, "uLightDir");
+  const int opacity_loc = gl::get_uniform_location(rigid_program, "uOpacity");
+  const int dissolve_loc = gl::get_uniform_location(rigid_program, "uDissolve");
+  const int dissolve_center_loc =
+      gl::get_uniform_location(rigid_program, "uDissolveCenter");
+  const int reveal_progress_loc =
+      gl::get_uniform_location(rigid_program, "uRevealProgress");
+  const int reveal_base_loc =
+      gl::get_uniform_location(rigid_program, "uRevealBaseY");
   gl::uniform3f(light_loc, kSunDirX, kSunDirY, kSunDirZ);
+  gl::uniform1f(dissolve_loc, character_dissolve);
+  gl::uniform3f(dissolve_center_loc, player_model.m[12],
+                player_model.m[13] + 0.77f, player_model.m[14]);
+  gl::uniform1f(reveal_progress_loc, character_reveal_progress);
+  gl::uniform1f(reveal_base_loc, player_model.m[13]);
+  gl::uniform1f(opacity_loc, 1.0f);
 
   for (const RigidMeshGpu &mesh : rigid_meshes_) {
+    // The Pharaoh summons the staff for combat instead of carrying it during
+    // locomotion. Keep the samurai's existing weapon behavior unchanged.
+    const bool staff_action = locomotion_ == LocomotionState::Swing ||
+                              locomotion_ == LocomotionState::Ultimate;
+    if (keep_weapon_upright_ && mesh.node_index == node_katana_ &&
+        !staff_action && staff_dismiss_time_ <= 0.0f) {
+      continue;
+    }
     Mat4 node_transform = Mat4::identity();
     if (mesh.node_index == node_katana_) {
       node_transform = katana_world_matrix();
@@ -1376,13 +1758,42 @@ void SamuraiAsset::draw(unsigned int skinned_program, unsigned int rigid_program
     gl::uniform_matrix4fv(mvp_loc, 1, kGlFalse, mvp.m);
     gl::uniform_matrix4fv(model_loc, 1, kGlFalse, world.m);
 
+    // The Pharaoh's staff condenses from sand at the start of the smash
+    // instead of appearing fully formed on a single frame.
+    const bool pharaoh_staff = keep_weapon_upright_ && mesh.node_index == node_katana_;
+    float opacity = 1.0f;
+    if (pharaoh_staff && staff_action) {
+      // Leave only the sand visible for a split second, then smoothly reveal
+      // the solid weapon underneath it.
+      const float staff_action_time = locomotion_ == LocomotionState::Ultimate
+                                          ? ultimate_time_
+                                          : swing_time_;
+      opacity = std::clamp((staff_action_time - 0.24f) / 0.20f, 0.0f, 1.0f);
+      opacity = opacity * opacity * (3.0f - 2.0f * opacity);
+    } else if (pharaoh_staff && staff_dismiss_time_ > 0.0f) {
+      opacity = std::clamp(staff_dismiss_time_ / 0.32f, 0.0f, 1.0f);
+      opacity = opacity * opacity * (3.0f - 2.0f * opacity);
+    }
+    opacity *= character_opacity;
+    const bool translucent_staff = opacity < 0.999f;
+    if (translucent_staff) {
+      gl::enable(kGlBlend);
+      gl::blend_func(kGlSrcAlpha, kGlOneMinusSrcAlpha);
+    }
+    gl::uniform1f(opacity_loc, opacity);
+
     const unsigned int tex = texture_for_material(mesh.material_index);
     gl::active_texture(kGlTexture0);
     gl::bind_texture(kGlTexture2D, tex);
     gl::uniform1i(tex_loc, 0);
 
-    gl::bind_vertex_array(mesh.vao);
-    gl::draw_elements(kGlTriangles, mesh.index_count, mesh.index_type, nullptr);
+    if (opacity > 0.001f) {
+      gl::bind_vertex_array(mesh.vao);
+      gl::draw_elements(kGlTriangles, mesh.index_count, mesh.index_type, nullptr);
+    }
+    if (translucent_staff) {
+      gl::disable(kGlBlend);
+    }
   }
 }
 
@@ -1396,6 +1807,67 @@ bool SamuraiAsset::sword_tip_world(const Mat4 &player_model, float &x, float &y,
   y = 0.0f;
   z = 1.2f / scale_;
   transform_point(model * katana, x, y, z);
+  return true;
+}
+
+bool SamuraiAsset::staff_segment_world(const Mat4 &player_model,
+                                       float &start_x, float &start_y, float &start_z,
+                                       float &end_x, float &end_y, float &end_z) const {
+  const bool staff_action = locomotion_ == LocomotionState::Swing ||
+                            locomotion_ == LocomotionState::Ultimate;
+  if (!keep_weapon_upright_ ||
+      (!staff_action && staff_dismiss_time_ <= 0.0f) ||
+      !katana_attached_to_hand()) {
+    return false;
+  }
+  const Mat4 staff_world = player_model * model_fixup_ * katana_world_matrix();
+  constexpr float staff_axis_x = 0.248998f;
+  constexpr float staff_axis_y = 0.439192f;
+  constexpr float staff_axis_z = 0.863198f;
+  // The exported staff extends mainly along the negative measured axis from
+  // its grip. The old positive interval put the sand behind the hands while
+  // the visible shaft extended in the opposite direction.
+  const bool ultimate_sleeve = locomotion_ == LocomotionState::Ultimate ||
+      (previous_locomotion_ == LocomotionState::Ultimate && staff_dismiss_time_ > 0.0f);
+  // The ultimate sleeve sits one foot-length higher than the raw staff bounds
+  // and just slightly toward the Pharaoh's right so it visually encloses the
+  // shaft instead of hanging below and left of it.
+  const float sleeve_start = ultimate_sleeve ? -0.65f : -0.84f;
+  const float sleeve_end = ultimate_sleeve ? 0.55f : 0.36f;
+  start_x = staff_axis_x * (sleeve_start / scale_);
+  start_y = staff_axis_y * (sleeve_start / scale_);
+  start_z = staff_axis_z * (sleeve_start / scale_);
+  end_x = staff_axis_x * (sleeve_end / scale_);
+  end_y = staff_axis_y * (sleeve_end / scale_);
+  end_z = staff_axis_z * (sleeve_end / scale_);
+  transform_point(staff_world, start_x, start_y, start_z);
+  transform_point(staff_world, end_x, end_y, end_z);
+  if (ultimate_sleeve) {
+    constexpr float right_offset = -0.05f;
+    const float right_length = std::max(
+        std::sqrt(player_model.m[0] * player_model.m[0] +
+                  player_model.m[2] * player_model.m[2]),
+        0.001f);
+    const float right_x = player_model.m[0] / right_length;
+    const float right_z = player_model.m[2] / right_length;
+    start_x += right_x * right_offset;
+    start_z += right_z * right_offset;
+    end_x += right_x * right_offset;
+    end_z += right_z * right_offset;
+  }
+  return true;
+}
+
+bool SamuraiAsset::finger_tip_world(const Mat4 &player_model, float &x, float &y,
+                                    float &z) const {
+  if (node_fingertip_ < 0 ||
+      node_fingertip_ >= static_cast<int>(global_matrices_.size())) {
+    return false;
+  }
+  x = 0.0f;
+  y = 0.0f;
+  z = 0.0f;
+  transform_point(player_model * model_fixup_ * node_global_matrix(node_fingertip_), x, y, z);
   return true;
 }
 

@@ -53,6 +53,7 @@ using GLDeleteRenderbuffersProc = void (*)(int, const unsigned int *);
 using GLGenTexturesProc = void (*)(int, unsigned int *);
 using GLBindTextureProc = void (*)(unsigned int, unsigned int);
 using GLDeleteTexturesProc = void (*)(int, const unsigned int *);
+using GLDeleteBuffersProc = void (*)(int, const unsigned int*);
 using GLActiveTextureProc = void (*)(unsigned int);
 using GLTexImage2DProc = void (*)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void *);
 using GLTexParameteriProc = void (*)(unsigned int, unsigned int, int);
@@ -117,6 +118,7 @@ GLDeleteRenderbuffersProc glDeleteRenderbuffers_fn = nullptr;
 GLGenTexturesProc glGenTextures_fn = nullptr;
 GLBindTextureProc glBindTexture_fn = nullptr;
 GLDeleteTexturesProc glDeleteTextures_fn = nullptr;
+GLDeleteBuffersProc glDeleteBuffers_fn = nullptr;
 GLActiveTextureProc glActiveTexture_fn = nullptr;
 GLTexImage2DProc glTexImage2D_fn = nullptr;
 GLTexParameteriProc glTexParameteri_fn = nullptr;
@@ -179,6 +181,7 @@ bool load() {
     LOAD_GL(glGenTextures, glGenTextures_fn, GLGenTexturesProc);
     LOAD_GL(glBindTexture, glBindTexture_fn, GLBindTextureProc);
     LOAD_GL(glDeleteTextures, glDeleteTextures_fn, GLDeleteTexturesProc);
+    LOAD_GL(glDeleteBuffers, glDeleteBuffers_fn, GLDeleteBuffersProc);
     LOAD_GL(glActiveTexture, glActiveTexture_fn, GLActiveTextureProc);
     LOAD_GL(glTexImage2D, glTexImage2D_fn, GLTexImage2DProc);
     LOAD_GL(glTexParameteri, glTexParameteri_fn, GLTexParameteriProc);
@@ -310,6 +313,11 @@ void tex_image2d(unsigned int target, int level, int internalformat,
                  int width, int height, int border, unsigned int format,
                  unsigned int type, const void *data) {
     glTexImage2D_fn(target, level, internalformat, width, height, border, format, type, data);
+}
+void delete_buffer(int n, const unsigned int* buffers) {
+    if (glDeleteBuffers_fn) {
+        glDeleteBuffers_fn(n, buffers);
+    }
 }
 void texParameteri(unsigned int target, unsigned int pname, int param) {
     glTexParameteri_fn(target, pname, param);

@@ -1,0 +1,22 @@
+PHARAOH LAN FIGHT
+
+Both computers must be connected to the same Wi-Fi.
+
+1. Copy the entire videogame folder to your brother's computer.
+2. On the host computer, double-click "Host LAN Game.bat".
+3. The black window shows the host's Wi-Fi IPv4 Address (often 192.168.x.x).
+4. On the other computer, double-click "Join LAN Game.bat" and enter that address.
+5. If Windows Firewall asks, allow videogame_cxx.exe on Private networks.
+
+Controls:
+  Left mouse: staff smash
+  Right mouse: finger projectile
+  Q: ultimate
+  W/A/S/D: move
+  Shift: sprint
+  Space twice: fly
+
+The host controls damage and three-second player respawns. The window title
+identifies which computer is HOST and which is JOINER.
+
+LAN port: UDP 27015

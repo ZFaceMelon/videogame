@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = Resolve-Path "$PSScriptRoot\.."
 
 Push-Location $Root
 try {

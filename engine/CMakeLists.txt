@@ -10,14 +10,23 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG        master
 )
-FetchContent_MakeAvailable(cgltf stb)
+FetchContent_Declare(
+    ufbx
+    GIT_REPOSITORY https://github.com/ufbx/ufbx.git
+    GIT_TAG        v0.14.1
+)
+FetchContent_MakeAvailable(cgltf stb ufbx)
 
 add_library(engine STATIC
     src/api.cpp
     src/engine.cpp
+    src/fbx_asset.cpp
     src/gl_loader.cpp
     src/gltf_asset.cpp
+    src/lan_network.cpp
+    src/pharaoh_character.cpp
     src/renderer.cpp
+    ${ufbx_SOURCE_DIR}/ufbx.c
 )
 
 target_include_directories(engine
@@ -26,6 +35,7 @@ target_include_directories(engine
     PRIVATE
         ${cgltf_SOURCE_DIR}
         ${stb_SOURCE_DIR}
+        ${ufbx_SOURCE_DIR}
 )
 
 target_compile_definitions(engine PRIVATE ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
@@ -33,7 +43,7 @@ target_compile_definitions(engine PRIVATE ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets
 target_link_libraries(engine PUBLIC glfw)
 
 if(WIN32)
-    target_link_libraries(engine PUBLIC opengl32)
+    target_link_libraries(engine PUBLIC opengl32 ws2_32)
 elseif(APPLE)
     find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
     find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
